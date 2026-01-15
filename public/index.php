@@ -54,7 +54,7 @@
             </div>
             <button type="submit" class="btn btn-primary">Login</button>
         </form>
-        <p class="text-muted"> Forget Your Password? <a href="../public/reset_request.php">Reset Password</a></p>
+       
     </div>
     
 </body>
