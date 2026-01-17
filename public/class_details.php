@@ -1,188 +1,135 @@
 <?php
 session_start();
-
-/* =====================================================
-   1. KẾT NỐI & CẤU HÌNH
-===================================================== */
-mysqli_report(MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT);
 $conn = mysqli_connect('localhost', 'root', '', 'student_management');
-$conn->set_charset('utf8mb4');
+mysqli_set_charset($conn, "utf8mb4");
 
-/* =====================================================
-   2. KHỞI TẠO BIẾN & KIỂM TRA ĐIỀU KIỆN ĐẦU VÀO
-===================================================== */
-$class_id = filter_input(INPUT_GET, 'class_id', FILTER_VALIDATE_INT) ?: 0;
-$subject_id = filter_input(INPUT_GET, 'subject_id', FILTER_VALIDATE_INT) ?: 0;
-$message = ['type' => '', 'content' => ''];
+$class_id = isset($_GET['id']) ? (int)$_GET['id'] : 0;
+if ($class_id == 0) { header("Location: manage_grades.php"); exit(); }
 
-if ($class_id <= 0) {
-    die("Lỗi: Yêu cầu mã lớp học hợp lệ.");
+// Lấy thông tin lớp & môn học
+$class_res = mysqli_query($conn, "SELECT * FROM classes WHERE class_id = '$class_id'");
+$class_info = mysqli_fetch_assoc($class_res);
+$class_name = $class_info['class_name'];
+
+$course_res = mysqli_query($conn, "SELECT course_id FROM courses WHERE class_id = '$class_id' LIMIT 1");
+if (mysqli_num_rows($course_res) > 0) {
+    $course_id = mysqli_fetch_assoc($course_res)['course_id'];
+} else {
+    mysqli_query($conn, "INSERT INTO courses (course_name, class_id) VALUES ('$class_name', '$class_id')");
+    $course_id = mysqli_insert_id($conn);
 }
 
-/* =====================================================
-   3. XỬ LÝ CẬP NHẬT ĐIỂM (POST)
-===================================================== */
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['btn_save_scores'])) {
+$msg = ""; $error = "";
+
+// 1. XỬ LÝ LƯU ĐIỂM & ĐIỂM DANH
+if (isset($_POST['btn_save_all'])) {
     $scores = $_POST['scores'] ?? [];
+    $attendance = $_POST['attendance'] ?? [];
+    $today = date('Y-m-d');
     
-    // Bắt đầu Transaction để đảm bảo an toàn dữ liệu
-    $conn->begin_transaction();
-    try {
-        $sql_upsert = "INSERT INTO grades (student_id, subject_id, score) 
-                       VALUES (?, ?, ?) 
-                       ON DUPLICATE KEY UPDATE score = VALUES(score)";
-        $stmt_save = $conn->prepare($sql_upsert);
-
-        foreach ($scores as $student_id => $score) {
-            if ($score === '' || $score === null) continue;
-            
-            $score_val = floatval($score);
-            $student_id_val = intval($student_id);
-            
-            $stmt_save->bind_param("iid", $student_id_val, $subject_id, $score_val);
-            $stmt_save->execute();
+    foreach ($scores as $s_id => $score) {
+        if ($score !== "") {
+            mysqli_query($conn, "INSERT INTO grades (student_id, course_id, score) VALUES ('$s_id', '$course_id', '$score') 
+                                ON DUPLICATE KEY UPDATE score = '$score'");
         }
-        
-        $conn->commit();
-        $message = ['type' => 'success', 'content' => '✅ Bảng điểm đã được cập nhật thành công!'];
-    } catch (Exception $e) {
-        $conn->rollback();
-        $message = ['type' => 'danger', 'content' => '❌ Lỗi hệ thống: ' . $e->getMessage()];
+        $status = isset($attendance[$s_id]) ? 'present' : 'absent';
+        mysqli_query($conn, "INSERT INTO attendance (student_id, date, status) VALUES ('$s_id', '$today', '$status') 
+                            ON DUPLICATE KEY UPDATE status = '$status'");
     }
+    $msg = "Cập nhật dữ liệu thành công!";
 }
 
-/* =====================================================
-   4. LẤY DỮ LIỆU HIỂN THỊ
-===================================================== */
-// A. Lấy thông tin lớp
-$class_stmt = $conn->prepare("SELECT class_name FROM classes WHERE class_id = ?");
-$class_stmt->bind_param("i", $class_id);
-$class_stmt->execute();
-$class_info = $class_stmt->get_result()->fetch_assoc();
-if (!$class_info) die("Lớp học không tồn tại.");
-
-// B. Lấy danh sách môn học
-$subjects = $conn->query("SELECT subject_id, subject_name FROM subjects ORDER BY subject_name ASC")->fetch_all(MYSQLI_ASSOC);
-if (!$subject_id && !empty($subjects)) {
-    $subject_id = $subjects[0]['subject_id'];
-}
-
-// C. Lấy danh sách sinh viên và điểm môn hiện tại
-$sql_list = "SELECT s.student_id, s.full_name, s.email, g.score 
-             FROM students s 
-             LEFT JOIN grades g ON s.student_id = g.student_id AND g.subject_id = ? 
-             WHERE s.class_id = ? 
-             ORDER BY s.full_name ASC";
-$stmt_list = $conn->prepare($sql_list);
-$stmt_list->bind_param("ii", $subject_id, $class_id);
-$stmt_list->execute();
-$students = $stmt_list->get_result()->fetch_all(MYSQLI_ASSOC);
+// 2. TRUY VẤN DANH SÁCH SINH VIÊN (CẢ TRONG LỚP VÀ ĐĂNG KÝ TỰ CHỌN)
+$today = date('Y-m-d');
+$sql_list = "
+    SELECT DISTINCT s.id, s.name, s.email, g.score, a.status,
+           (CASE WHEN s.class_id = '$class_id' THEN 'Chính quy' ELSE 'Tự chọn' END) as type
+    FROM student_info s
+    LEFT JOIN course_registrations cr ON s.id = cr.student_id
+    LEFT JOIN grades g ON s.id = g.student_id AND g.course_id = '$course_id'
+    LEFT JOIN attendance a ON s.id = a.student_id AND a.date = '$today'
+    WHERE s.class_id = '$class_id' OR cr.course_id = '$course_id'
+    ORDER BY type DESC, s.name ASC";
+$list_students = mysqli_query($conn, $sql_list);
 ?>
 
 <!DOCTYPE html>
 <html lang="vi">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Nhập điểm: <?= htmlspecialchars($class_info['class_name']) ?></title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons/font/bootstrap-icons.css" rel="stylesheet">
+    <title>Quản lý lớp: <?= htmlspecialchars($class_name) ?></title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
     <style>
-        :root { --primary-color: #4361ee; }
-        body { background-color: #f1f3f9; font-family: 'Inter', sans-serif; }
-        .grade-card { border: none; border-radius: 12px; overflow: hidden; }
-        .table-header { background-color: var(--primary-color); color: white; }
-        .score-input { width: 100px; margin: auto; transition: all 0.2s; }
-        .score-input:focus { border-color: var(--primary-color); box-shadow: 0 0 0 0.25rem rgba(67, 97, 238, 0.15); }
+        body { background: #f0f2f5; }
+        .card-custom { border-radius: 15px; border: none; box-shadow: 0 5px 15px rgba(0,0,0,0.08); }
+        .type-badge { font-size: 0.7rem; padding: 2px 8px; border-radius: 10px; }
     </style>
 </head>
 <body>
-
 <div class="container py-5">
-    <div class="d-flex justify-content-between align-items-center mb-4">
-        <div>
-            <h1 class="h3 fw-bold text-dark mb-1">Quản lý điểm lớp: <?= htmlspecialchars($class_info['class_name']) ?></h1>
-            <p class="text-muted small">Cập nhật điểm số định kỳ cho sinh viên</p>
-        </div>
-        <a href="manage_classes.php" class="btn btn-light border rounded-pill px-4">
-            <i class="bi bi-chevron-left"></i> Quay lại
-        </a>
-    </div>
-
-    <?php if ($message['content']): ?>
-        <div class="alert alert-<?= $message['type'] ?> alert-dismissible fade show border-0 shadow-sm" role="alert">
-            <?= $message['content'] ?>
-            <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
-        </div>
-    <?php endif; ?>
-
-    <div class="card grade-card shadow-sm mb-4">
-        <div class="card-body bg-white p-4">
-            <form method="GET" class="row g-3 align-items-end">
-                <input type="hidden" name="class_id" value="<?= $class_id ?>">
-                <div class="col-md-4">
-                    <label class="form-label fw-semibold">Chọn học phần</label>
-                    <select name="subject_id" class="form-select" onchange="this.form.submit()">
-                        <?php foreach ($subjects as $sub): ?>
-                            <option value="<?= $sub['subject_id'] ?>" <?= $sub['subject_id'] == $subject_id ? 'selected' : '' ?>>
-                                <?= htmlspecialchars($sub['subject_name']) ?>
-                            </option>
-                        <?php endforeach; ?>
-                    </select>
-                </div>
-            </form>
+    <div class="card card-custom p-4 mb-4 bg-white">
+        <div class="d-flex justify-content-between align-items-center">
+            <div>
+                <h2 class="fw-bold mb-0 text-primary small-caps"><?= htmlspecialchars($class_name) ?></h2>
+                <p class="text-muted mb-0">Giảng viên: <?= htmlspecialchars($class_info['teacher_name'] ?? 'Chưa cập nhật') ?></p>
+            </div>
+            <a href="../models/manage_grades.php" class="btn btn-outline-secondary rounded-pill"> Quay lại</a>
         </div>
     </div>
+
+    <?php if($msg) echo "<div class='alert alert-success border-0 shadow-sm'>$msg</div>"; ?>
 
     <form method="POST">
-        <div class="card grade-card shadow-sm">
+        <div class="card card-custom bg-white">
+            <div class="card-header bg-white border-0 py-3 d-flex justify-content-between align-items-center">
+                <h5 class="fw-bold m-0"><i class="bi bi-list-check me-2"></i>Danh sách sinh viên</h5>
+                <button type="submit" name="btn_save_all" class="btn btn-primary fw-bold px-4 shadow">LƯU BẢNG ĐIỂM</button>
+            </div>
             <div class="table-responsive">
                 <table class="table table-hover align-middle mb-0">
-                    <thead class="table-header">
+                    <thead class="table-light text-center">
                         <tr>
-                            <th class="ps-4">Thông tin sinh viên</th>
-                            <th>Email</th>
-                            <th class="text-center" style="width: 200px;">Điểm số (0-10)</th>
+                            <th class="text-start ps-4">Sinh viên</th>
+                            <th>Loại hình</th>
+                            <th width="150">Điểm môn</th>
+                            <th width="120">Có mặt</th>
                         </tr>
                     </thead>
                     <tbody>
-                        <?php if (count($students) > 0): ?>
-                            <?php foreach ($students as $s): ?>
-                                <tr>
-                                    <td class="ps-4">
-                                        <div class="fw-bold"><?= htmlspecialchars($s['full_name']) ?></div>
-                                        <small class="text-muted">MS: SV-<?= $s['student_id'] ?></small>
-                                    </td>
-                                    <td><?= htmlspecialchars($s['email']) ?></td>
-                                    <td>
-                                        <input type="number" 
-                                               step="0.01" min="0" max="10" 
-                                               name="scores[<?= $s['student_id'] ?>]" 
-                                               value="<?= $s['score'] ?>" 
-                                               class="form-control text-center score-input fw-bold"
-                                               placeholder="-">
-                                    </td>
-                                </tr>
-                            <?php endforeach; ?>
-                        <?php else: ?>
-                            <tr>
-                                <td colspan="3" class="text-center py-5 text-muted">Không tìm thấy sinh viên nào trong lớp.</td>
+                        <?php if(mysqli_num_rows($list_students) > 0): ?>
+                            <?php while($s = mysqli_fetch_assoc($list_students)): ?>
+                            <tr class="text-center">
+                                <td class="text-start ps-4">
+                                    <div class="fw-bold"><?= htmlspecialchars($s['name']) ?></div>
+                                    <small class="text-muted"><?= htmlspecialchars($s['email']) ?></small>
+                                </td>
+                                <td>
+                                    <span class="type-badge <?= $s['type'] == 'Chính quy' ? 'bg-info-subtle text-info' : 'bg-warning-subtle text-warning' ?>">
+                                        <?= $s['type'] ?>
+                                    </span>
+                                </td>
+                                <td>
+                                    <input type="number" step="0.1" name="scores[<?= $s['id'] ?>]" 
+                                           class="form-control text-center border-0 bg-light fw-bold" 
+                                           value="<?= $s['score'] ?>" placeholder="-">
+                                </td>
+                                <td>
+                                    <div class="form-check form-switch d-inline-block">
+                                        <input type="checkbox" name="attendance[<?= $s['id'] ?>]" 
+                                               class="form-check-input" <?= $s['status'] == 'present' ? 'checked' : '' ?>>
+                                    </div>
+                                </td>
                             </tr>
+                            <?php endwhile; ?>
+                        <?php else: ?>
+                            <tr><td colspan="4" class="py-5 text-center text-muted">Chưa có sinh viên nào đăng ký học phần này.</td></tr>
                         <?php endif; ?>
                     </tbody>
                 </table>
             </div>
-            <?php if (!empty($students)): ?>
-            <div class="card-footer bg-white p-4 border-top-0 text-end">
-                <button type="submit" name="btn_save_scores" class="btn btn-primary btn-lg px-5 rounded-pill shadow-sm">
-                    <i class="bi bi-cloud-arrow-up me-2"></i> Xác nhận lưu điểm
-                </button>
-            </div>
-            <?php endif; ?>
         </div>
     </form>
 </div>
-
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 </body>
 </html>
